@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Computer Use ライブ映像テスト</title>
+  <style>
+    body { margin: 0; padding: 1.5rem; background: #101827; color: #f7fafc; font: 17px/1.5 system-ui, sans-serif; }
+    main { max-width: 940px; margin: auto; }
+    .panel { margin: 1rem 0; padding: 1.2rem; border: 2px solid #6ee7b7; border-radius: 14px; background: #1e293b; }
+    .row { display: flex; gap: .7rem; flex-wrap: wrap; align-items: center; }
+    button, input { font: inherit; padding: .6rem .8rem; border-radius: 8px; }
+    button { border: 0; background: #6ee7b7; color: #10201b; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input { background: #f8fafc; color: #10201b; border: 0; }
+    a { color: #6ee7b7; overflow-wrap: anywhere; }
+    code { color: #fcd34d; }
+    #clock { font-size: clamp(3rem, 8vw, 6rem); font-variant-numeric: tabular-nums; font-weight: 800; }
+    #remote-video { width: 100%; max-height: 550px; background: #050b14; border-radius: 8px; }
+    #status { color: #fcd34d; font-weight: 700; }
+    #publisher, #viewer { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Computer Use ライブ映像テスト</h1>
+    <p>公開テストタブだけを画面共有し、操作中の連続映像が別ブラウザへ届くか確認します。音声は送信しません。</p>
+    <section class="panel">
+      <p id="role-line"></p>
+      <p id="status" role="status">準備中</p>
+      <p id="capabilities"></p>
+      <p>ペアURL: <a id="other-link"></a></p>
+    </section>
+    <section id="publisher" class="panel">
+      <h2>操作・配信側</h2>
+      <div id="clock">00:00.0</div>
+      <div class="row">
+        <button id="mark" type="button">マークする</button>
+        <strong id="count">クリック: 0回</strong>
+      </div>
+      <p><label for="note">テスト文字列</label> <input id="note" autocomplete="off" placeholder="capture probe"></p>
+      <button id="save" type="button">入力を確定</button>
+      <p id="note-status">入力待ち</p>
+      <div class="row">
+        <button id="start" type="button" disabled>このタブを共有して配信</button>
+        <button id="stop" type="button" disabled>配信を停止</button>
+      </div>
+      <p>画面共有ダイアログでは、このテストタブだけを選択してください。</p>
+    </section>
+    <section id="viewer" class="panel">
+      <h2>視聴側</h2>
+      <video id="remote-video" autoplay muted playsinline></video>
+      <p id="stats">受信フレーム: 0 / 変化したフレーム: 0</p>
+      <p>時計・クリック数・入力確定の変化が動画の中に連続して映るか確認します。</p>
+    </section>
+  </main>
+  <script src="./peerjs.min.js"></script>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      let room = params.get('room');
+      if (!room) {
+        room = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+        params.set('room', room);
+        history.replaceState(null, '', `${location.pathname}?${params}`);
+      }
+      const role = params.get('role') === 'publisher' ? 'publisher' : 'viewer';
+      const status = document.getElementById('status');
+      const capabilities = document.getElementById('capabilities');
+      const peerId = `cu-probe-${room}-${role}`;
+      const remoteId = `cu-probe-${room}-${role === 'viewer' ? 'publisher' : 'viewer'}`;
+      const other = new URL(location.href);
+      other.searchParams.set('role', role === 'viewer' ? 'publisher' : 'viewer');
+      document.getElementById('role-line').textContent = `${role === 'viewer' ? '視聴側' : '操作・配信側'} / room=${room}`;
+      const link = document.getElementById('other-link');
+      link.href = other.href;
+      link.textContent = other.href;
+      document.getElementById(role).style.display = 'block';
+      capabilities.textContent = `secureContext=${isSecureContext}, getDisplayMedia=${Boolean(navigator.mediaDevices?.getDisplayMedia)}, RTCPeerConnection=${Boolean(window.RTCPeerConnection)}, PeerJS=${Boolean(window.Peer)}`;
+      if (!/^[a-f0-9]{16}$/.test(room)) {
+        status.textContent = 'room は16桁の16進数で指定してください';
+        return;
+      }
+      if (!window.Peer) {
+        status.textContent = 'PeerJSを読み込めませんでした';
+        return;
+      }
+      const peer = new Peer(peerId);
+      let call = null;
+      let stream = null;
+      peer.on('open', () => {
+        status.textContent = role === 'viewer' ? '視聴準備完了。操作側で共有を開始してください' : '配信準備完了。視聴側を先に開いてください';
+        if (role === 'publisher') document.getElementById('start').disabled = false;
+      });
+      peer.on('error', err => { status.textContent = `PeerJSエラー: ${err.type || err.name}: ${err.message}`; });
+      peer.on('disconnected', () => { status.textContent = 'シグナリングサーバーから切断されました'; });
+
+      if (role === 'viewer') {
+        const video = document.getElementById('remote-video');
+        const stats = document.getElementById('stats');
+        const canvas = document.createElement('canvas');
+        canvas.width = 24;
+        canvas.height = 14;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        let frames = 0;
+        let changes = 0;
+        let previous = '';
+        function measureFrame() {
+          if (!video.srcObject) return;
+          frames += 1;
+          try {
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let checksum = 0;
+            for (let i = 0; i < pixels.length; i += 4) checksum = (checksum * 33 + pixels[i] + 3 * pixels[i + 1] + 7 * pixels[i + 2]) >>> 0;
+            const value = String(checksum);
+            if (previous && value !== previous) changes += 1;
+            previous = value;
+            stats.textContent = `受信フレーム: ${frames} / 変化したフレーム: ${changes} / ${video.videoWidth}×${video.videoHeight}`;
+          } catch (err) {
+            stats.textContent = `フレーム計測失敗: ${err.name}: ${err.message}`;
+          }
+          video.requestVideoFrameCallback(measureFrame);
+        }
+        peer.on('call', incoming => {
+          if (incoming.peer !== remoteId) { incoming.close(); return; }
+          call = incoming;
+          incoming.answer();
+          status.textContent = '接続中';
+          incoming.on('stream', incomingStream => {
+            video.srcObject = incomingStream;
+            video.play().then(() => {
+              status.textContent = 'ライブ映像を受信中';
+              video.requestVideoFrameCallback(measureFrame);
+            }).catch(err => { status.textContent = `再生失敗: ${err.name}: ${err.message}`; });
+          });
+          incoming.on('close', () => { status.textContent = '配信が終了しました'; video.srcObject = null; });
+          incoming.on('error', err => { status.textContent = `通話エラー: ${err.message}`; });
+        });
+      } else {
+        const started = performance.now();
+        const clock = document.getElementById('clock');
+        setInterval(() => {
+          const ticks = Math.floor((performance.now() - started) / 100);
+          clock.textContent = `${String(Math.floor(ticks / 600)).padStart(2, '0')}:${String(Math.floor(ticks / 10) % 60).padStart(2, '0')}.${ticks % 10}`;
+        }, 100);
+        let count = 0;
+        document.getElementById('mark').onclick = () => { document.getElementById('count').textContent = `クリック: ${++count}回`; };
+        document.getElementById('save').onclick = () => { document.getElementById('note-status').textContent = `入力確定: ${document.getElementById('note').value}`; };
+        const start = document.getElementById('start');
+        const stop = document.getElementById('stop');
+        function stopSharing() {
+          call?.close();
+          call = null;
+          stream?.getTracks().forEach(track => track.stop());
+          stream = null;
+          start.disabled = false;
+          stop.disabled = true;
+          status.textContent = '配信停止';
+        }
+        stop.onclick = stopSharing;
+        start.onclick = async () => {
+          if (!navigator.mediaDevices?.getDisplayMedia) {
+            status.textContent = 'getDisplayMediaを利用できません';
+            return;
+          }
+          try {
+            stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, preferCurrentTab: true, selfBrowserSurface: 'include' });
+            stream.getVideoTracks()[0]?.addEventListener('ended', stopSharing, { once: true });
+            status.textContent = `画面共有を開始: displaySurface=${stream.getVideoTracks()[0]?.getSettings().displaySurface || 'unknown'}。視聴側へ接続中`;
+            call = peer.call(remoteId, stream);
+            if (!call) throw new Error('視聴側へ通話を開始できませんでした');
+            call.on('stream', () => { status.textContent = 'ライブ映像を配信中'; });
+            call.on('error', err => { status.textContent = `通話エラー: ${err.message}`; });
+            call.on('close', stopSharing);
+            start.disabled = true;
+            stop.disabled = false;
+          } catch (err) {
+            stream?.getTracks().forEach(track => track.stop());
+            stream = null;
+            status.textContent = `配信開始失敗: ${err.name}: ${err.message}`;
+          }
+        };
+      }
+      addEventListener('beforeunload', () => { call?.close(); stream?.getTracks().forEach(track => track.stop()); peer.destroy(); });
+    })();
+  </script>
+</body>
+</html>
