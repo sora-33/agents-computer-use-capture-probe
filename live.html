@@ -93,7 +93,12 @@
         if (role === 'publisher') document.getElementById('start').disabled = false;
       });
       peer.on('error', err => { status.textContent = `PeerJSエラー: ${err.type || err.name}: ${err.message}`; });
-      peer.on('disconnected', () => { status.textContent = 'シグナリングサーバーから切断されました'; });
+      peer.on('disconnected', () => {
+        status.textContent = 'シグナリングサーバーから切断。再接続中';
+        setTimeout(() => {
+          if (!peer.destroyed && peer.disconnected) peer.reconnect();
+        }, 1000);
+      });
 
       if (role === 'viewer') {
         const video = document.getElementById('remote-video');
