@@ -169,8 +169,16 @@
             status.textContent = 'getDisplayMediaを利用できません';
             return;
           }
+          start.disabled = true;
+          const requestedAt = performance.now();
+          status.textContent = '共有ボタン押下。getDisplayMediaの結果を待っています';
+          const pendingTimer = setInterval(() => {
+            const seconds = Math.floor((performance.now() - requestedAt) / 1000);
+            status.textContent = `getDisplayMediaの結果待ち ${seconds}秒 / visibility=${document.visibilityState} / focus=${document.hasFocus()}`;
+          }, 2000);
           try {
             stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, preferCurrentTab: true, selfBrowserSurface: 'include' });
+            clearInterval(pendingTimer);
             stream.getVideoTracks()[0]?.addEventListener('ended', stopSharing, { once: true });
             status.textContent = `画面共有を開始: displaySurface=${stream.getVideoTracks()[0]?.getSettings().displaySurface || 'unknown'}。視聴側へ接続中`;
             call = peer.call(remoteId, stream);
@@ -181,8 +189,10 @@
             start.disabled = true;
             stop.disabled = false;
           } catch (err) {
+            clearInterval(pendingTimer);
             stream?.getTracks().forEach(track => track.stop());
             stream = null;
+            start.disabled = false;
             status.textContent = `配信開始失敗: ${err.name}: ${err.message}`;
           }
         };
