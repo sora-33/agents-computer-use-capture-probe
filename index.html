@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Computer Use 画面収録テスト</title>
+  <style>
+    body { font: 18px/1.5 system-ui, sans-serif; margin: 0; padding: 2rem; background: #101827; color: #f7fafc; }
+    main { max-width: 720px; margin: auto; }
+    .panel { padding: 1.5rem; border: 2px solid #6ee7b7; border-radius: 16px; background: #1e293b; }
+    #clock { font-size: clamp(3rem, 9vw, 6rem); font-variant-numeric: tabular-nums; font-weight: 800; letter-spacing: .04em; }
+    button, input { font: inherit; padding: .65rem .85rem; border-radius: 8px; }
+    button { background: #6ee7b7; border: 0; color: #10201b; font-weight: 700; cursor: pointer; }
+    input { width: min(100%, 360px); box-sizing: border-box; border: 2px solid #94a3b8; }
+    label { display: block; margin: 1rem 0 .3rem; }
+    .row { display: flex; gap: .7rem; align-items: center; flex-wrap: wrap; margin-top: 1rem; }
+    #status { font-weight: 700; color: #fcd34d; }
+    small { display: block; margin-top: 1rem; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Computer Use 画面収録テスト</h1>
+    <p>動く時計、クリック、文字入力が同じ動画に映るか確認するためのページです。データは送信しません。</p>
+    <section class="panel">
+      <div id="clock" aria-label="経過秒数">00:00.0</div>
+      <div class="row">
+        <button id="mark" type="button">マークする</button>
+        <span id="count">クリック: 0回</span>
+      </div>
+      <label for="note">テスト文字列</label>
+      <input id="note" type="text" autocomplete="off" placeholder="ここに入力してください">
+      <div class="row"><button id="save" type="button">入力を確定</button></div>
+      <p id="status" role="status">操作待ち</p>
+    </section>
+    <section class="panel" style="margin-top: 1rem">
+      <h2>ブラウザ内での画面収録テスト</h2>
+      <p>OS側の録画ができない場合に試します。画面共有の許可画面が表示され、選択できるかを確認します。</p>
+      <button id="screen-share" type="button">画面収録を開始</button>
+      <button id="screen-stop" type="button" disabled>画面収録を停止</button>
+      <p id="share-status" role="status">未実行</p>
+      <p id="capabilities"></p>
+      <video id="preview" controls playsinline style="display:none; width:100%; max-height:360px"></video>
+    </section>
+    <small>時計は100msごとに更新します。録画の中で連続して動けば、静止画の更新と区別できます。</small>
+  </main>
+  <script>
+    const started = performance.now();
+    const clock = document.getElementById('clock');
+    const status = document.getElementById('status');
+    let count = 0;
+    setInterval(() => {
+      const elapsed = Math.floor((performance.now() - started) / 100);
+      const minutes = String(Math.floor(elapsed / 600)).padStart(2, '0');
+      const seconds = String(Math.floor(elapsed / 10) % 60).padStart(2, '0');
+      clock.textContent = `${minutes}:${seconds}.${elapsed % 10}`;
+    }, 100);
+    document.getElementById('mark').addEventListener('click', () => {
+      count += 1;
+      document.getElementById('count').textContent = `クリック: ${count}回`;
+      status.textContent = `マーク ${count} を記録`;
+    });
+    document.getElementById('save').addEventListener('click', () => {
+      status.textContent = `入力確定: ${document.getElementById('note').value}`;
+    });
+    const startButton = document.getElementById('screen-share');
+    const stopButton = document.getElementById('screen-stop');
+    const shareStatus = document.getElementById('share-status');
+    const preview = document.getElementById('preview');
+    const capabilities = document.getElementById('capabilities');
+    capabilities.textContent = `secureContext=${window.isSecureContext}, getDisplayMedia=${Boolean(navigator.mediaDevices?.getDisplayMedia)}, MediaRecorder=${Boolean(window.MediaRecorder)}`;
+    let activeRecorder;
+    let activeStream;
+    let safetyTimer;
+    stopButton.addEventListener('click', () => {
+      if (activeRecorder?.state === 'recording') activeRecorder.stop();
+    });
+    startButton.addEventListener('click', async () => {
+      if (!navigator.mediaDevices?.getDisplayMedia || !window.MediaRecorder) {
+        shareStatus.textContent = 'このブラウザでは getDisplayMedia または MediaRecorder が使えません';
+        return;
+      }
+      try {
+        activeStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false, preferCurrentTab: true });
+        const chunks = [];
+        activeRecorder = new MediaRecorder(activeStream);
+        activeRecorder.addEventListener('dataavailable', event => {
+          if (event.data.size) chunks.push(event.data);
+        });
+        activeRecorder.addEventListener('stop', async () => {
+          clearTimeout(safetyTimer);
+          activeStream.getTracks().forEach(track => track.stop());
+          startButton.disabled = false;
+          stopButton.disabled = true;
+          const blob = new Blob(chunks, { type: activeRecorder.mimeType });
+          preview.src = URL.createObjectURL(blob);
+          preview.style.display = 'block';
+          shareStatus.textContent = `録画完了: ${blob.size} bytes, ${activeRecorder.mimeType}。再生してマーク操作が映るか確認してください`;
+          if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
+            try {
+              const response = await fetch('/upload', { method: 'POST', body: blob });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              shareStatus.textContent += '。ローカルサーバーへ保存済み';
+            } catch (error) {
+              shareStatus.textContent += `。ローカル保存失敗: ${error.message}`;
+            }
+          }
+        });
+        activeStream.getVideoTracks()[0]?.addEventListener('ended', () => {
+          if (activeRecorder?.state === 'recording') activeRecorder.stop();
+        });
+        activeRecorder.start();
+        startButton.disabled = true;
+        stopButton.disabled = false;
+        shareStatus.textContent = '収録中。マーク操作をしてから「画面収録を停止」を押してください';
+        safetyTimer = setTimeout(() => {
+          if (activeRecorder?.state === 'recording') activeRecorder.stop();
+        }, 45000);
+      } catch (error) {
+        activeStream?.getTracks().forEach(track => track.stop());
+        shareStatus.textContent = `収録を開始できませんでした: ${error.name}: ${error.message}`;
+      }
+    });
+  </script>
+</body>
+</html>
